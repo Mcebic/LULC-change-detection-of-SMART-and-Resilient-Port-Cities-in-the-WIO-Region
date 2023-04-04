@@ -1,0 +1,667 @@
+---
+title: "LULC Port Cities"
+author: "Mcebisi Qabaqaba"
+date: "2023-03-21"
+output: html_document
+---
+
+
+# ------------------------------------------------------------------------------------------
+
+**Objectives of the Document (Land use land cover classification of Mombasa 2010, 2015, 2022):** 
+
+*(1) Import  the Worldview images for 2010, 2015 and 2022*
+
+*(2) Carrying out land use land cover classification using machine learning models*
+
+*(3) The Worldview Images for eThekwini and CatoRidge band 1, 2, 3, and 4 were imported into R*
+
+*(4) Export the indices data as csv formats for further analyses*
+
+*(5) Perform Land accuracy assessment of RF and CART models*
+
+# ------------------------------------------------------------------------------------------
+
+
+**Section 1: Load Libraries and set working directory-**
+
+**Load Packages**
+
+# ------------------------------------------------------------------------------------------
+
+
+```{r}
+library(devtools)
+#install_github("bleutner/RStoolbox")
+```
+
+
+
+```{r}
+# Packages for spatial data processing & visualization
+library(rgdal)
+library(raster)
+library(sf)
+library(sp)
+library(RStoolbox)
+library(rasterVis)
+library(RColorBrewer)
+library(plotly)
+library(grDevices)
+library(rpart.plot)
+library(corrplot)
+```
+
+
+
+```{r}
+# Machine learning packages
+library(caret)
+library(randomForest)
+library(ranger)
+library(MLmetrics)
+library(nnet)
+library(NeuralNetTools)
+library(LiblineaR)
+library(e1071)
+library(rpart)
+```
+
+
+
+```{r}
+# Packages for general data processing and parallel computation
+library(data.table)
+library(dplyr)
+library(stringr)
+library(doParallel)
+library(snow)
+library(parallel)
+```
+
+
+
+*Section 1: Import spectral worldview image bands*
+
+
+```{r}
+getwd()
+Mombasa_2022 <- stack("Mombasa_2022.tif")
+```
+
+
+**This specifies the characteristics of the imagery or bands we imported into R**
+
+
+```{r}
+Mombasa_2022
+```
+
+
+**Now we rename the bands in the Mombasa_2022 stacked imagery**
+
+
+
+```{r}
+names(Mombasa_2022)
+names(Mombasa_2022) <- c("Blue", "Green", "Red", "NIR", "Coastal_Blue", "Yellow", "Rededge", "NIR2")
+```
+
+
+
+```{r}
+writeRaster(Mombasa_2022$Blue, "Blue.tif", filetype = "GTiff", datatype = 'INT2S', overwrite=TRUE)
+writeRaster(Mombasa_2022$Green, "Green.tif", filetype = "GTiff", datatype='INT2S', overwrite = TRUE)
+writeRaster(Mombasa_2022$Red, "Red.tif", filetype = "GTiff", datatype='INT2S', overwrite = TRUE)
+writeRaster(Mombasa_2022$NIR, "NIR.tif", filetype = "GTiff", datatype='INT2S', overwrite = TRUE)
+writeRaster(Mombasa_2022$Coastal_Blue, "Coastal_Blue.tif", filetype = "GTiff", datatype='INT2S', overwrite = TRUE)
+writeRaster(Mombasa_2022$Yellow, "Yellow.tif", filetype = "GTiff", datatype='INT2S', overwrite = TRUE)
+writeRaster(Mombasa_2022$Rededge, "Rededge.tif", filetype = "GTiff", datatype='INT2S', overwrite = TRUE)
+writeRaster(Mombasa_2022$NIR2, "NIR2.tif", filetype = "GTiff", datatype='INT2S', overwrite = TRUE)
+```
+
+
+
+```{r}
+B1 <- raster("Blue.tif")
+B2 <- raster("Green.tif")
+B3 <- raster("Red.tif")
+B4 <- raster("NIR.tif")
+B5 <- raster("Coastal_Blue.tif")
+B6 <- raster("Yellow.tif")
+B7 <- raster("Rededge.tif")
+B8 <- raster("NIR2.tif")
+```
+
+
+
+**Spectral indices performed on Worldview 2 imagery**
+
+
+
+```{r}
+VI_2022 <- spectralIndices(Mombasa_2022,
+                           red = "Red",
+                           nir = "NIR",
+                           indices = c("NDVI", "SAVI", "MSAVI"), coefs = list(L = 0.5, G = 2.5, L_evi = 1, C1 = 6, C2 = 7.5, s = 1, swir2ccc = NULL,swir2coc = NULL))
+```
+
+
+
+```{r}
+VI_2022
+```
+
+
+
+```{r}
+writeRaster(VI_2022$NDVI, "NDVI2022.img",  datatype = 'FLT4S', overwrite=TRUE)
+writeRaster(VI_2022$SAVI, "SAVI2022.img",  datatype = 'FLT4S', overwrite=TRUE)
+writeRaster(VI_2022$MSAVI, "MSAVI.img",  datatype = 'FLT4S', overwrite=TRUE)
+```
+
+
+
+
+```{r}
+NDVI <- raster("NDVI2022.img")
+SAVI <- raster("SAVI2022.img")
+MSAVI <- raster("MSAVI.img")
+```
+
+
+Stack the indices together
+
+
+```{r}
+VI_2022 <- stack(NDVI, SAVI, MSAVI)
+names(VI_2022) <- c("NDVI", "SAVI", "MSAVI")
+names(VI_2022)
+```
+
+
+
+
+```{r}
+covs <- stack(Mombasa_2022, VI_2022)
+```
+
+
+
+
+
+```{r}
+Mombasa_2022
+covs
+```
+
+
+
+**Lets save the covs Layer as a .RDS so that we can clear our working directory and start loading from that step**
+
+
+
+```{r}
+saveRDS(covs, file = "covs.rds")
+covs = readRDS("covs.rds")
+covs
+```  
+
+
+
+
+We load the study area and the training Data. The training data goes beyond the study area extent and we need to fix this. 
+
+
+
+```{r}
+study_area <- shapefile('mombasa county.shp')
+tData <- readOGR(choose.files())
+#ta_data@data
+```
+
+
+
+We check the extents of the training data, satellite imagery and study area using the extent function. The resultant extents will tell us if the three objects cover the same extent and if the are using the same projections.
+
+
+
+```{r}
+extent(tData)
+extent(study_area)
+extent(covs)
+```
+
+
+
+We crop the training data to the extent of the study area. If all the training polygons already fall within the extent we can ignore these step.
+
+
+
+```{r}
+tData    = crop (TrainData, extent(study_area)) # Crop the training data with the ROI
+# Save an object to a file
+saveRDS(tData, file = "tData.rds")
+plot(tData)
+plot
+```
+
+
+
+
+```{r}
+# Restore the object
+tData <- readRDS(file = "tData.rds")
+```
+
+
+
+Based on the information from the extent information we can say that the training data has a different projection from the satellite imagery. here we use the spTranform to project the trainingData. Change the CRS for training Data to match our imagery 
+
+
+
+```{r}
+crs(tData)
+crs(covs)
+tData <-  spTransform(tData, CRS("+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs"))
+```
+
+
+Load the polygons and extract random points from the polygons
+
+
+```{r}
+set.seed(555)
+# load the polygons with land use land cover information
+tData@data
+# generate 15000 point samples from the polygons
+ptsamp <- spsample(tData, 55000, 'regular') #Create randomly point samples
+# We use the x-y coordinates to extract the spectral values for the locations
+#We add the class field from the imported shapefile to the point samples generated above  
+# add the land cover class to the points
+saveRDS(ptsamp, file = "ptsamp.rds")
+str(ptsamp)
+ptsamp$class <- over(ptsamp, tData)$class
+```
+
+
+
+Use the points to extract information from the worldview imagery
+
+
+
+```{r}
+ta<-as.data.frame(extract(covs, ptsamp))
+# To see some of the reflectance values
+head(ta)
+tail(ta)
+#sampdata <- data.frame(class = ptsamp$class, df)
+#summary(sampdata)
+#sampdata <- na.omit(sampdata@data)
+saveRDS(ta, file = "ta.rds")
+```
+
+
+
+```{r}
+ta <- readRDS(file = "ta.rds")
+```
+
+
+A plot of the spectrum (all bands and Indices) for pixels representing a certain is known as a spectral profile. Such profiles demonstrate the differences in spectral properties of various earth surface features and constitute the basis for image analysis. Spectral values can be extracted from any multispectral data set using extract function. In the above example, we extracted values of Worldview imagery for the training points that were generated from the training data shapefiles. First we compute the mean reflectance values for each class and each band.
+
+
+
+
+```{r}
+ms <- aggregate(ta[,-1], list(ptsamp$class), mean, na.rm = T)
+head(ms)
+# instead of the first column, we use row names
+rownames(ms) <- ms[,1]
+ms <- ms[,-1]
+ms
+```
+
+
+
+```{r}
+# Create a vector of color for the land cover classes for use in plotting
+mycolor <- c('darkred', 'yellow', 'burlywood', 'cyan', 'blue')
+#transform ms from a data.frame to a matrix
+ms <- as.matrix(ms)
+# First create an empty plot
+plot(0, ylim=c(-5000,5000), xlim = c(1,9), type='n', xlab="Bands", ylab = "Reflectance")
+# add the different classes
+for (i in 1:nrow(ms)){
+  lines(ms[i,], type = "l", lwd = 3, lty = 1, col = mycolor[i])
+}
+# Title
+title(main="Spectral Signatures", font.main = 2)
+# Legend
+legend("topleft", rownames(ms),
+       cex=0.8, col=mycolor, lty = 1, lwd =3, bty = "n")
+```
+
+
+**Image Classification**
+
+
+Image classification is a procedure for assigning each pixel in an image to a particular class or category based on statistical characteristics of brightness values. In this study we will image classification using Random Forest and CART algorithms. We create a data frame from our randomly created points.
+
+
+
+```{r}
+ptsamp@data=data.frame(ptsamp@data,ta[match(rownames(ptsamp@data), rownames(ta)),])
+```
+
+
+
+After that, let’s take a look at the structure of the whole training data set using
+str() function. This gives us an overview of the data set.
+
+
+```{r}
+str(ptsamp@data)
+```
+
+
+The dataframe consists of 54000 observations and 12 variables. the response variable consists of  
+
+
+
+```{r}
+summary(ptsamp@data)
+```
+
+
+We remove the NA's from the dataframe
+
+
+```{r}
+ptsamp@data <- na.omit(ptsamp@data)
+```
+
+
+
+
+```{r}
+complete.cases(ptsamp@data)
+```
+
+
+
+**Prepare training and test data sets**
+
+
+It is commonly suggested to partition the training dataset into random subsets for training, validation, and testing. However, in this study, we will only split the training dataset into two subsets: training and testing. Before doing so, we must set a specific value using set.seed() to make sure that the results can be replicated. Setting the seed to a particular number will guarantee that we obtain the same outcome. You can select any number you wish to set as the seed.
+
+
+
+Notes Note that the response (target) variable is ptsamp@data$class, which contains the different land use/cover classes. The “p” parameter shows the percentage of the split, that is we are using p = 0.8. This simply means that data split has 80% training set and 20% test set. The “list” parameter indicates whether to return a list or matrix. In this case, we pass FALSE because we are not returning a list.
+
+
+
+```{r}
+set.seed(1234)
+inTraining <- createDataPartition(ptsamp@data$class,p = .70, list = FALSE)
+training <- ptsamp@data[ inTraining,]
+testing <- ptsamp@data[-inTraining,]
+```
+
+
+
+
+**Check the summary statistics (training and test data sets)**
+
+
+
+```{r}
+summary(training)
+summary(testing)
+```
+
+
+
+
+```{r}
+skewnessValues <- apply(training[, 2:12], 2, skewness)
+skewnessValues
+```
+
+
+
+```{r}
+bandCorrelations <- cor(training[, 2:12])
+dim(bandCorrelations)
+bandCorrelations
+```
+
+
+
+```{r}
+corrplot(bandCorrelations, method = "number", type =
+"upper")
+corrplot(bandCorrelations, method = "color", order =
+"hclust", type = "lower")
+corrplot.mixed(bandCorrelations,lower.col="black",
+number.cex = .7, upper = "color")
+```
+
+
+
+
+we are going to use the caret package to build and evaluate different machine learning classifiers.
+We will start by setting up tuning parameters, and then move on to train and evaluate each machine learning classifier
+
+
+
+**Set-up model tuning parameters**
+
+
+
+Choosing suitable model tuning parameters is crucial to prevent issues like overfitting, as many classifiers have one or more vital parameters that determine the model's complexity. In this study, we will utilize the trainControl() function from the caret package to assess the influence of model tuning parameters on performance via resampling. This process will help us determine the optimal model and estimate its performance. Therefore, let's set the model tuning parameters as follows.
+
+
+
+We specify the “method”, “number” and “repeats” parameters of the trainControl() function. The “method” parameter contains resampling methods such as “repeatedcv”, “boot”, “cv”, “LOOCV” etc.
+
+
+we are going to use repeatedcv that is the repeated cross-validation. The “number” parameter refers to the number of folds or number of resampling iterations. The “repeats” parameter provides sets of folds in order to compute repeated cross-validation. In this case, we are running a 5-fold cross validation
+and repeating it five times (that is, number = 5 and repeats = 5).
+
+
+
+```{r}
+fitControl<- trainControl(method = "repeatedcv",
+                          number = 5,
+                          repeats = 5)
+```
+
+
+
+we are going to train a single DT classifier using the CART algorithm available in rpart package. The single DT is trained as follows. First a single variable that best splits the training data into two groups is selected. After that, the process is applied separately to
+each sub-group recursively until the sub-groups reach a minimum size. The second stage of the procedure consists of using cross-validation to prune back the full tree. Here, a “complexity
+parameter”, is defined as the primary tuning parameters. The complexity parameter (cp) is used to control the size of the decision tree and to select the optimal tree size.
+
+
+
+```{r}
+set.seed(1234)
+cart_model<-train(class~.,data=training,
+                  method="rpart",
+                  trControl=fitControl)
+```
+
+
+
+Check the performance of the classifier. We use the print() and plot() functions.
+
+
+
+```{r}
+print(cart_model)
+plot(cart_model)
+```
+
+
+We check the parameters for the best model
+
+
+```{r}
+cart_model$finalModel
+rpart.plot(cart_model$finalModel)
+```
+
+
+
+
+
+```{r}
+cart_varImp <- varImp(cart_model, compete = FALSE)
+ggplot(cart_varImp)
+```
+
+
+
+We perform accuracy assessment. First, we use the model for prediction, and then after build a confusion matrix as shown in the commands below. Note the predict() function will not work here if there are missing values. Therefore if the data has any NA values use “na.action = na.pass”.
+
+
+
+```{r}
+pred_cart<- predict(cart_model,newdata = testing)
+confusionMatrix(pred_cart, as.factor(testing$class))
+```
+
+
+
+**Train the random forest (RF) classifier**
+
+
+Random forests have proved to be efficient in remote sensing image classification. In RF models, the crucial tuning parameter is mtry, which indicates the number of randomly selected predictors (k) utilized for each split. 
+
+
+
+```{r}
+set.seed(1234)
+rf_model<-train(class~.,data=training, method="rf",trControl=fitControl,
+                prox=TRUE,fitBest = FALSE, returnData = TRUE)
+```
+
+
+
+
+Next, let’s check the RF model performance. Again we use the print() and plot() functions as shown in the commands below.
+
+
+
+```{r}
+saveRDS(rf_model, file = "rf_model.rds")
+rf_model <- readRDS(file = "rf_model.rds")
+```
+
+
+
+
+```{r}
+print(rf_model)
+plot(rf_model)
+```
+
+
+
+
+The RF model was tuned over the values of the mtry parameter. The best model had an mtry value of 2 with an overall accuracy of 74%, which is relatively good
+
+
+```{r}
+rf_model$finalModel
+```
+
+
+We observe the most importance variables, to display variable importance use varImp() function.
+
+
+
+```{r}
+rf_varImp <- varImp(rf_model, compete = FALSE)
+plot(rf_varImp)
+```
+
+
+
+```{r}
+pred_rf <- predict(rf_model, newdata = testing)
+confusionMatrix(pred_rf, as.factor(testing$class))
+```
+
+
+
+**Compare CART and RF machine learning classifiers**
+
+
+
+Let us compare CART and RF machine learning classifiers based on the cross-validation statistics. Here, we are going to use the resamples() function because the machine learning classifiers share a common set of resampled data sets. First, we run the resamples(), and then check the resamps object as shown in the command below
+
+
+
+```{r}
+resamps <- resamples(list(rpart = cart_model,
+                          e1071 = rf_model))
+```
+
+
+
+```{r}
+resamps
+```
+
+
+
+Now we will check the summary statistics, and then display the results in graphic form. Note that this is a comparison of the model training performance.
+
+
+
+```{r}
+summary (resamps)
+bwplot(resamps, layout = c(3, 1))
+```
+
+
+
+**Perform classification**
+
+
+Next, let’s perform land use/cover classification using all machine learning classifiers. Be patience, since it takes time to run all the classifications.
+
+
+
+```{r}
+timeStart<- proc.time() # measure computation time
+LC_cart <-predict(covs,cart_model)
+LC_rf <-predict(covs,rf_model)
+proc.time() - timeStart
+```
+
+
+
+
+**Display final land use/cover classifications**
+
+
+
+We are going to use the ggplot2() function to display all land use / cover maps using the following commands.
+
+
+
+
+```{r}
+LC_cart_84a <- gplot(LC_cart) + geom_raster(aes(fill = factor(value, labels=c("Agriculture", "Bareland", "Green Spaces", "Urban")))) + scale_fill_manual(values = c("yellow", "grey", "green3", "red"), name= "Land Cover") + ggtitle("Decision Trees Classification") +theme (plot.title = element_text(lineheight=.4, face="bold")) + coord_equal()
+```
+
+
+
+
+
+
+
+
